@@ -746,7 +746,8 @@ def count_contact_points(
 
 @wp.kernel(enable_backward=False)
 def broadphase_collision_pairs(
-    contact_pairs: wp.array(dtype=int, ndim=2),
+    #contact_pairs: wp.array(dtype=int, ndim=2),
+    shapes: wp.array(dtype=int),
     body_q: wp.array(dtype=wp.transform),
     shape_X_bs: wp.array(dtype=wp.transform),
     shape_body: wp.array(dtype=int),
@@ -765,9 +766,18 @@ def broadphase_collision_pairs(
     contact_point_id: wp.array(dtype=int),
     contact_point_limit: wp.array(dtype=int),
 ):
+    """
     tid = wp.tid()
     shape_a = contact_pairs[tid, 0]
     shape_b = contact_pairs[tid, 1]
+    """
+
+    x, y = wp.tid()
+    shape_a = shapes[x]
+    shape_b = shapes[y]
+
+    if shape_a >= shape_b:
+        return
 
     mass_a = 0.0
     mass_b = 0.0
@@ -959,6 +969,7 @@ def broadphase_collision_pairs(
     if num_contacts > 0:
         index = wp.atomic_add(contact_count, 0, num_contacts)
         if index + num_contacts - 1 >= rigid_contact_max:
+            print(num_contacts)
             print("Number of rigid contacts exceeded limit. Increase Model.rigid_contact_max.")
             return
         # allocate contact points
@@ -1480,19 +1491,19 @@ def collide(model, state, edge_sdf_iter: int = 10, iterate_mesh_vertices: bool =
                 device=model.device,
             )
 
-        if model.shape_contact_pair_count or model.ground and model.shape_ground_contact_pair_count:
+        if model.c_shape_count or model.ground and model.shape_ground_contact_pair_count:
             # clear old count
             model.rigid_contact_count.zero_()
 
             model.rigid_contact_broad_shape0.fill_(-1)
             model.rigid_contact_broad_shape1.fill_(-1)
 
-        if model.shape_contact_pair_count:
+        if model.c_shape_count:
             wp.launch(
                 kernel=broadphase_collision_pairs,
-                dim=model.shape_contact_pair_count,
+                dim=(model.c_shape_count, model.c_shape_count),
                 inputs=[
-                    model.shape_contact_pairs,
+                    model.wp_shapes,
                     state.body_q,
                     model.shape_transform,
                     model.shape_body,
@@ -1545,7 +1556,7 @@ def collide(model, state, edge_sdf_iter: int = 10, iterate_mesh_vertices: bool =
                 record_tape=False,
             )
 
-        if model.shape_contact_pair_count or model.ground and model.shape_ground_contact_pair_count:
+        if model.c_shape_count or model.ground and model.shape_ground_contact_pair_count:
             if requires_grad:
                 model.rigid_contact_point0 = wp.clone(model.rigid_contact_point0)
                 model.rigid_contact_point1 = wp.clone(model.rigid_contact_point1)
