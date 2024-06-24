@@ -1751,7 +1751,7 @@ def eval_tetrahedral_forces(model: Model, state: State, control: Control, partic
 
 def eval_body_contact_forces(model: Model, state: State, particle_f: wp.array):
     if model.rigid_contact_max and (
-        model.ground and model.shape_ground_contact_pair_count or model.shape_contact_pair_count
+        model.ground and model.shape_ground_contact_pair_count or model.c_shape_count
     ):
         wp.launch(
             kernel=eval_rigid_contacts,

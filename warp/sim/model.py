@@ -893,6 +893,7 @@ class Model:
         import copy
         import itertools
 
+        """
         filters = copy.copy(self.shape_collision_filter_pairs)
         for a, b in self.shape_collision_filter_pairs:
             filters.add((b, a))
@@ -913,6 +914,7 @@ class Model:
                         contact_pairs.append((shape_a, shape_b))
         self.shape_contact_pairs = wp.array(np.array(contact_pairs), dtype=wp.int32, device=self.device)
         self.shape_contact_pair_count = len(contact_pairs)
+        """
         # find ground contact pairs
         ground_contact_pairs = []
         ground_id = self.shape_count - 1
@@ -921,6 +923,10 @@ class Model:
                 ground_contact_pairs.append((i, ground_id))
         self.shape_ground_contact_pairs = wp.array(np.array(ground_contact_pairs), dtype=wp.int32, device=self.device)
         self.shape_ground_contact_pair_count = len(ground_contact_pairs)
+
+        shapes = np.array(self.shape_collision_group_map[-1])
+        self.wp_shapes = wp.array(shapes, dtype=wp.int32)
+        self.c_shape_count = len(shapes)
 
     def count_contact_points(self):
         """
@@ -4461,8 +4467,11 @@ class ModelBuilder:
             if m.particle_count:
                 m.allocate_soft_contacts(self.soft_contact_max, requires_grad=requires_grad)
             m.find_shape_contact_pairs()
+            #ow
             if self.num_rigid_contacts_per_env is None:
-                contact_count, limited_contact_count = m.count_contact_points()
+                print("Set num_rigid_contacts_per_env!")
+                raise Exception
+                #contact_count, limited_contact_count = m.count_contact_points()
             else:
                 contact_count = limited_contact_count = self.num_rigid_contacts_per_env * self.num_envs
             if contact_count:
