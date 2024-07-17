@@ -99,6 +99,7 @@ def vector(length, dtype):
         # warp scalar type:
         _wp_scalar_type_ = dtype
         _wp_type_params_ = [length, dtype]
+        _wp_type_args_ = {"length": length, "dtype": dtype}
         _wp_generic_type_str_ = "vec_t"
         _wp_generic_type_hint_ = Vector
         _wp_constructor_ = "vector"
@@ -282,6 +283,7 @@ def matrix(shape, dtype):
         # used in type checking and when writing out c++ code for constructors:
         _wp_scalar_type_ = dtype
         _wp_type_params_ = [shape[0], shape[1], dtype]
+        _wp_type_args_ = {"shape": (shape[0], shape[1]), "dtype": dtype}
         _wp_generic_type_str_ = "mat_t"
         _wp_generic_type_hint_ = Matrix
         _wp_constructor_ = "matrix"
@@ -707,6 +709,7 @@ def quaternion(dtype=Any):
 
     ret = quat_t
     ret._wp_type_params_ = [dtype]
+    ret._wp_type_args_ = {"dtype": dtype}
     ret._wp_generic_type_str_ = "quat_t"
     ret._wp_generic_type_hint_ = Quaternion
     ret._wp_constructor_ = "quaternion"
@@ -743,6 +746,7 @@ def transformation(dtype=Any):
             ),
         )
         _wp_type_params_ = [dtype]
+        _wp_type_args_ = {"dtype": dtype}
         _wp_generic_type_str_ = "transform_t"
         _wp_generic_type_hint_ = Transformation
         _wp_constructor_ = "transformation"
@@ -1400,6 +1404,11 @@ def type_is_vector(t):
     return getattr(t, "_wp_generic_type_hint_", None) is Vector
 
 
+# returns True if the passed *type* is a quaternion
+def type_is_quaternion(t):
+    return getattr(t, "_wp_generic_type_hint_", None) is Quaternion
+
+
 # returns True if the passed *type* is a matrix
 def type_is_matrix(t):
     return getattr(t, "_wp_generic_type_hint_", None) is Matrix
@@ -1432,22 +1441,6 @@ def is_array(a):
 
 
 def scalars_equal(a, b, match_generic):
-    if match_generic:
-        if a == Any or b == Any:
-            return True
-        if a == Scalar and b in scalar_and_bool_types:
-            return True
-        if b == Scalar and a in scalar_and_bool_types:
-            return True
-        if a == Scalar and b == Scalar:
-            return True
-        if a == Float and b in float_types:
-            return True
-        if b == Float and a in float_types:
-            return True
-        if a == Float and b == Float:
-            return True
-
     # convert to canonical types
     if a == float:
         a = float32
@@ -1462,6 +1455,28 @@ def scalars_equal(a, b, match_generic):
         b = int32
     elif b == builtins.bool:
         b = bool
+
+    if match_generic:
+        if a == Any or b == Any:
+            return True
+        if a == Int and b in int_types:
+            return True
+        if b == Int and a in int_types:
+            return True
+        if a == Int and b == Int:
+            return True
+        if a == Scalar and b in scalar_and_bool_types:
+            return True
+        if b == Scalar and a in scalar_and_bool_types:
+            return True
+        if a == Scalar and b == Scalar:
+            return True
+        if a == Float and b in float_types:
+            return True
+        if b == Float and a in float_types:
+            return True
+        if a == Float and b == Float:
+            return True
 
     return a == b
 
@@ -2164,6 +2179,9 @@ class array(Array):
         """
         Enables A @ B syntax for matrix multiplication
         """
+        if not is_array(other):
+            return NotImplemented
+
         if self.ndim != 2 or other.ndim != 2:
             raise RuntimeError(
                 "A has dim = {}, B has dim = {}. If multiplying with @, A and B must have dim = 2.".format(
@@ -2841,6 +2859,11 @@ def array_type_id(a):
 
 
 class Bvh:
+    def __new__(cls, *args, **kwargs):
+        instance = super(Bvh, cls).__new__(cls)
+        instance.id = None
+        return instance
+
     def __init__(self, lowers, uppers):
         """Class representing a bounding volume hierarchy.
 
@@ -2852,8 +2875,6 @@ class Bvh:
             lowers (:class:`warp.array`): Array of lower bounds :class:`warp.vec3`
             uppers (:class:`warp.array`): Array of upper bounds :class:`warp.vec3`
         """
-
-        self.id = 0
 
         if len(lowers) != len(uppers):
             raise RuntimeError("Bvh the same number of lower and upper bounds must be provided")
@@ -2916,6 +2937,11 @@ class Mesh:
         "indices": Var("indices", array(dtype=int32)),
     }
 
+    def __new__(cls, *args, **kwargs):
+        instance = super(Mesh, cls).__new__(cls)
+        instance.id = None
+        return instance
+
     def __init__(self, points=None, indices=None, velocities=None, support_winding_number=False):
         """Class representing a triangle mesh.
 
@@ -2929,8 +2955,6 @@ class Mesh:
             velocities (:class:`warp.array`): Array of vertex velocities of type :class:`warp.vec3` (optional)
             support_winding_number (bool): If true the mesh will build additional datastructures to support `wp.mesh_query_point_sign_winding_number()` queries
         """
-
-        self.id = 0
 
         if points.device != indices.device:
             raise RuntimeError("Mesh points and indices must live on the same device")
@@ -3001,6 +3025,11 @@ class Volume:
     #: Enum value to specify trilinear interpolation during sampling
     LINEAR = constant(1)
 
+    def __new__(cls, *args, **kwargs):
+        instance = super(Volume, cls).__new__(cls)
+        instance.id = None
+        return instance
+
     def __init__(self, data: array, copy: bool = True):
         """Class representing a sparse grid.
 
@@ -3008,8 +3037,6 @@ class Volume:
             data (:class:`warp.array`): Array of bytes representing the volume in NanoVDB format
             copy (bool): Whether the incoming data will be copied or aliased
         """
-
-        self.id = 0
 
         # keep a runtime reference for orderly destruction
         self.runtime = warp.context.runtime
@@ -3855,7 +3882,8 @@ def matmul(
 
     # cpu fallback if no cuda devices found
     if device == "cpu":
-        d.assign(alpha * (a.numpy() @ b.numpy()) + beta * c.numpy())
+        np_dtype = warp_type_to_np_dtype[a.dtype]
+        d.assign(alpha * np.matmul(a.numpy(), b.numpy(), dtype=np_dtype) + beta * c.numpy())
         return
 
     cc = device.arch
@@ -3971,8 +3999,9 @@ def adj_matmul(
 
     # cpu fallback if no cuda devices found
     if device == "cpu":
-        adj_a.assign(alpha * np.matmul(adj_d.numpy(), b.numpy().transpose()) + adj_a.numpy())
-        adj_b.assign(alpha * (a.numpy().transpose() @ adj_d.numpy()) + adj_b.numpy())
+        np_dtype = warp_type_to_np_dtype[a.dtype]
+        adj_a.assign(alpha * np.matmul(adj_d.numpy(), b.numpy().transpose(), dtype=np_dtype) + adj_a.numpy())
+        adj_b.assign(alpha * np.matmul(a.numpy().transpose(), adj_d.numpy(), dtype=np_dtype) + adj_b.numpy())
         adj_c.assign(beta * adj_d.numpy() + adj_c.numpy())
         return
 
@@ -4138,7 +4167,8 @@ def batched_matmul(
 
     # cpu fallback if no cuda devices found
     if device == "cpu":
-        d.assign(alpha * np.matmul(a.numpy(), b.numpy()) + beta * c.numpy())
+        np_dtype = warp_type_to_np_dtype[a.dtype]
+        d.assign(alpha * np.matmul(a.numpy(), b.numpy(), dtype=np_dtype) + beta * c.numpy())
         return
 
     # handle case in which batch_count exceeds max_batch_count, which is a CUDA array size maximum
@@ -4282,8 +4312,9 @@ def adj_batched_matmul(
 
     # cpu fallback if no cuda devices found
     if device == "cpu":
-        adj_a.assign(alpha * np.matmul(adj_d.numpy(), b.numpy().transpose((0, 2, 1))) + adj_a.numpy())
-        adj_b.assign(alpha * np.matmul(a.numpy().transpose((0, 2, 1)), adj_d.numpy()) + adj_b.numpy())
+        np_dtype = warp_type_to_np_dtype[a.dtype]
+        adj_a.assign(alpha * np.matmul(adj_d.numpy(), b.numpy().transpose((0, 2, 1)), dtype=np_dtype) + adj_a.numpy())
+        adj_b.assign(alpha * np.matmul(a.numpy().transpose((0, 2, 1)), adj_d.numpy(), dtype=np_dtype) + adj_b.numpy())
         adj_c.assign(beta * adj_d.numpy() + adj_c.numpy())
         return
 
@@ -4487,6 +4518,11 @@ def adj_batched_matmul(
 
 
 class HashGrid:
+    def __new__(cls, *args, **kwargs):
+        instance = super(HashGrid, cls).__new__(cls)
+        instance.id = None
+        return instance
+
     def __init__(self, dim_x, dim_y, dim_z, device=None):
         """Class representing a hash grid object for accelerated point queries.
 
@@ -4499,8 +4535,6 @@ class HashGrid:
             dim_y (int): Number of cells in y-axis
             dim_z (int): Number of cells in z-axis
         """
-
-        self.id = 0
 
         self.runtime = warp.context.runtime
 
@@ -4559,6 +4593,11 @@ class HashGrid:
 
 
 class MarchingCubes:
+    def __new__(cls, *args, **kwargs):
+        instance = super(MarchingCubes, cls).__new__(cls)
+        instance.id = None
+        return instance
+
     def __init__(self, nx: int, ny: int, nz: int, max_verts: int, max_tris: int, device=None):
         """CUDA-based Marching Cubes algorithm to extract a 2D surface mesh from a 3D volume.
 

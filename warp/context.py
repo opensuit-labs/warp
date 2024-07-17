@@ -18,6 +18,7 @@ import os
 import platform
 import sys
 import types
+import typing
 from copy import copy as shallowcopy
 from pathlib import Path
 from struct import pack as struct_pack
@@ -34,7 +35,7 @@ import warp.config
 
 
 def create_value_func(type):
-    def value_func(args, kwds, templates):
+    def value_func(arg_types, arg_values):
         return type
 
     return value_func
@@ -42,7 +43,7 @@ def create_value_func(type):
 
 def get_function_args(func):
     """Ensures that all function arguments are annotated and returns a dictionary mapping from argument name to its type."""
-    argspec = inspect.getfullargspec(func)
+    argspec = warp.codegen.get_full_arg_spec(func)
 
     # use source-level argument annotations
     if len(argspec.annotations) < len(argspec.args):
@@ -63,7 +64,8 @@ class Function:
         input_types=None,
         value_type=None,
         value_func=None,
-        template_func=None,
+        export_func=None,
+        dispatch_func=None,
         module=None,
         variadic=False,
         initializer_list_func=None,
@@ -97,14 +99,15 @@ class Function:
         self.namespace = namespace
         self.value_type = value_type
         self.value_func = value_func  # a function that takes a list of args and a list of templates and returns the value type, e.g.: load(array, index) returns the type of value being loaded
-        self.template_func = template_func
+        self.export_func = export_func
+        self.dispatch_func = dispatch_func
         self.input_types = {}
         self.export = export
         self.doc = doc
         self.group = group
         self.module = module
         self.variadic = variadic  # function can take arbitrary number of inputs, e.g.: printf()
-        self.defaults = defaults
+        self.defaults = {} if defaults is None else defaults
         # Function instance for a custom implementation of the replay pass
         self.custom_replay_func = custom_replay_func
         self.native_snippet = native_snippet
@@ -180,6 +183,33 @@ class Function:
         if not skip_adding_overload:
             self.add_overload(self)
 
+        # Store a description of the function's signature that can be used
+        # to resolve a bunch of positional/keyword/variadic arguments against,
+        # in a way that is compatible with Python's semantics.
+        signature_params = []
+        signature_default_param_kind = inspect.Parameter.POSITIONAL_OR_KEYWORD
+        for param_name in self.input_types.keys():
+            if param_name.startswith("**"):
+                param_name = param_name[2:]
+                param_kind = inspect.Parameter.VAR_KEYWORD
+            elif param_name.startswith("*"):
+                param_name = param_name[1:]
+                param_kind = inspect.Parameter.VAR_POSITIONAL
+
+                # Once a variadic argument like `*args` is found, any following
+                # arguments need to be passed using keywords.
+                signature_default_param_kind = inspect.Parameter.KEYWORD_ONLY
+            else:
+                param_kind = signature_default_param_kind
+
+            param = param = inspect.Parameter(
+                param_name,
+                param_kind,
+                default=self.defaults.get(param_name, inspect.Parameter.empty),
+            )
+            signature_params.append(param)
+        self.signature = inspect.Signature(signature_params)
+
         # add to current module
         if module:
             module.register_function(self, skip_adding_overload)
@@ -247,7 +277,7 @@ class Function:
 
         # only export simple types that don't use arrays
         for v in self.input_types.values():
-            if isinstance(v, warp.array) or v in complex_type_hints:
+            if warp.types.is_array(v) or v in complex_type_hints:
                 return False
 
         if type(self.value_type) in sequence_types:
@@ -261,8 +291,14 @@ class Function:
 
         name = "builtin_" + self.key
 
+        # Runtime arguments that are to be passed to the function, not its template signature.
+        if self.export_func is not None:
+            func_args = self.export_func(self.input_types)
+        else:
+            func_args = self.input_types
+
         types = []
-        for t in self.input_types.values():
+        for t in func_args.values():
             types.append(t.__name__)
 
         return "_".join([name, *types])
@@ -299,7 +335,7 @@ class Function:
                     )
                 self.user_overloads[sig] = f
 
-    def get_overload(self, arg_types):
+    def get_overload(self, arg_types, kwarg_types):
         assert not self.is_builtin()
 
         sig = warp.types.get_signature(arg_types, func_name=self.key)
@@ -352,10 +388,16 @@ def call_builtin(func: Function, *params) -> Tuple[bool, Any]:
     # Retrieve the built-in function from Warp's dll.
     c_func = getattr(warp.context.runtime.core, func.mangled_name)
 
+    # Runtime arguments that are to be passed to the function, not its template signature.
+    if func.export_func is not None:
+        func_args = func.export_func(func.input_types)
+    else:
+        func_args = func.input_types
+
     # Try gathering the parameters that the function expects and pack them
     # into their corresponding C types.
     c_params = []
-    for i, (_, arg_type) in enumerate(func.input_types.items()):
+    for i, (_, arg_type) in enumerate(func_args.items()):
         param = params[i]
 
         try:
@@ -485,7 +527,8 @@ def call_builtin(func: Function, *params) -> Tuple[bool, Any]:
                 c_params.append(arg_type._type_(param))
 
     # returns the corresponding ctype for a scalar or vector warp type
-    value_type = func.value_func(None, None, None)
+    value_type = func.value_func(None, None)
+
     if value_type == float:
         value_ctype = ctypes.c_float
     elif value_type == int:
@@ -742,7 +785,6 @@ def func_grad(forward_fn):
                 input_types=reverse_args,
                 value_func=None,
                 module=f.module,
-                template_func=f.template_func,
                 skip_forward_codegen=True,
                 custom_reverse_mode=True,
                 custom_reverse_num_input_args=len(f.input_types),
@@ -807,7 +849,7 @@ def func_replay(forward_fn):
                 f"Cannot define custom replay definition for {forward_fn.key} since the provided replay function has generic input arguments."
             )
 
-        f = forward_fn.get_overload(arg_types)
+        f = forward_fn.get_overload(arg_types, {})
         if f is None:
             inputs_str = ", ".join([f"{k}: {v.__name__}" for k, v in args.items()])
             raise RuntimeError(
@@ -819,8 +861,9 @@ def func_replay(forward_fn):
             namespace=f.namespace,
             input_types=f.input_types,
             value_func=f.value_func,
+            export_func=f.export_func,
+            dispatch_func=f.dispatch_func,
             module=f.module,
-            template_func=f.template_func,
             skip_reverse_codegen=True,
             skip_adding_overload=True,
             code_transformers=f.adj.transformers,
@@ -920,7 +963,7 @@ def overload(kernel, arg_types=None):
             )
 
         # ensure all arguments are annotated
-        argspec = inspect.getfullargspec(fn)
+        argspec = warp.codegen.get_full_arg_spec(fn)
         if len(argspec.annotations) < len(argspec.args):
             raise RuntimeError(f"Incomplete argument annotations on kernel overload {fn.__name__}")
 
@@ -965,7 +1008,8 @@ def add_builtin(
     constraint=None,
     value_type=None,
     value_func=None,
-    template_func=None,
+    export_func=None,
+    dispatch_func=None,
     doc="",
     namespace="wp::",
     variadic=False,
@@ -979,18 +1023,66 @@ def add_builtin(
     defaults=None,
     require_original_output_arg=False,
 ):
+    """Main entry point to register a new built-in function.
+
+    Args:
+        key (str): Function name. Multiple overloaded functions can be registered
+            under the same name as long as their signature differ.
+        input_types (Mapping[str, Any]): Signature of the user-facing function.
+            Variadic arguments are supported by prefixing the parameter names
+            with asterisks as in `*args` and `**kwargs`. Generic arguments are
+            supported with types such as `Any`, `Float`, `Scalar`, etc.
+        constraint (Callable): For functions that define generic arguments and
+            are to be exported, this callback is used to specify whether some
+            combination of inferred arguments are valid or not.
+        value_type (Any): Type returned by the function.
+        value_func (Callable): Callback used to specify the return type when
+            `value_type` isn't enough.
+        export_func (Callable): Callback used during the context stage to specify
+            the signature of the underlying C++ function, not accounting for
+            the template parameters.
+            If not provided, `input_types` is used.
+        dispatch_func (Callable): Callback used during the codegen stage to specify
+            the runtime and template arguments to be passed to the underlying C++
+            function. In other words, this allows defining a mapping between
+            the signatures of the user-facing and the C++ functions, and even to
+            dynamically create new arguments on the fly.
+            The arguments returned must be of type `codegen.Var`.
+            If not provided, all arguments passed by the users when calling
+            the built-in are passed as-is as runtime arguments to the C++ function.
+        doc (str): Used to generate the Python's docstring and the HTML documentation.
+        namespace: Namespace for the underlying C++ function.
+        variadic (bool): Whether the function declares variadic arguments.
+        initializer_list_func (bool): Whether to use the initializer list syntax
+            when passing the arguments to the underlying C++ function.
+        export (bool): Whether the function is to be exposed to the Python
+            interpreter so that it becomes available from within the `warp`
+            module.
+        group (str): Classification used for the documentation.
+        hidden (bool): Whether to add that function into the documentation.
+        skip_replay (bool): Whether operation will be performed during
+            the forward replay in the backward pass.
+        missing_grad (bool): Whether the function is missing a corresponding
+            adjoint.
+        native_func (str): Name of the underlying C++ function.
+        defaults (Mapping[str, Any]): Default values for the parameters defined
+            in `input_types`.
+        require_original_output_arg (bool): Used during the codegen stage to
+            specify whether an adjoint parameter corresponding to the return
+            value should be included in the signature of the backward function.
+    """
     if input_types is None:
         input_types = {}
 
     # wrap simple single-type functions with a value_func()
     if value_func is None:
 
-        def value_func(args, kwds, templates):
+        def value_func(arg_types, arg_values):
             return value_type
 
     if initializer_list_func is None:
 
-        def initializer_list_func(args, templates):
+        def initializer_list_func(args, return_type):
             return False
 
     if defaults is None:
@@ -998,8 +1090,13 @@ def add_builtin(
 
     # Add specialized versions of this builtin if it's generic by matching arguments against
     # hard coded types. We do this so you can use hard coded warp types outside kernels:
+    if export_func is not None:
+        func_arg_types = export_func(input_types)
+    else:
+        func_arg_types = input_types
+
     generic = False
-    for x in input_types.values():
+    for x in func_arg_types.values():
         if warp.types.type_is_generic(x):
             generic = True
             break
@@ -1007,7 +1104,7 @@ def add_builtin(
     if generic and export:
         # collect the parent type names of all the generic arguments:
         genericset = set()
-        for t in input_types.values():
+        for t in func_arg_types.values():
             if hasattr(t, "_wp_generic_type_hint_"):
                 genericset.add(t._wp_generic_type_hint_)
             elif warp.types.type_is_generic_scalar(t):
@@ -1059,15 +1156,17 @@ def add_builtin(
 
                 typelists.append(l)
 
-            for argtypes in itertools.product(*typelists):
+            for arg_types in itertools.product(*typelists):
+                arg_types = dict(zip(input_types.keys(), arg_types))
+
                 # Some of these argument lists won't work, eg if the function is mul(), we won't be
                 # able to do a matrix vector multiplication for a mat22 and a vec3. The `constraint`
                 # function determines which combinations are valid:
                 if constraint:
-                    if constraint(argtypes) is False:
+                    if constraint(arg_types) is False:
                         continue
 
-                return_type = value_func(argtypes, {}, [])
+                return_type = value_func(arg_types, None)
 
                 # The return_type might just be vector_t(length=3,dtype=wp.float32), so we've got to match that
                 # in the list of hard coded types so it knows it's returning one of them:
@@ -1085,8 +1184,10 @@ def add_builtin(
                 # finally we can generate a function call for these concrete types:
                 add_builtin(
                     key,
-                    input_types=dict(zip(input_types.keys(), argtypes)),
+                    input_types=arg_types,
                     value_type=return_type,
+                    export_func=export_func,
+                    dispatch_func=dispatch_func,
                     doc=doc,
                     namespace=namespace,
                     variadic=variadic,
@@ -1096,6 +1197,7 @@ def add_builtin(
                     hidden=True,
                     skip_replay=skip_replay,
                     missing_grad=missing_grad,
+                    defaults=defaults,
                     require_original_output_arg=require_original_output_arg,
                 )
 
@@ -1106,7 +1208,8 @@ def add_builtin(
         input_types=input_types,
         value_type=value_type,
         value_func=value_func,
-        template_func=template_func,
+        export_func=export_func,
+        dispatch_func=dispatch_func,
         variadic=variadic,
         initializer_list_func=initializer_list_func,
         export=export,
@@ -1250,7 +1353,7 @@ class ModuleBuilder:
             if not func.value_func:
 
                 def wrap(adj):
-                    def value_type(arg_types, kwds, templates):
+                    def value_type(arg_types, arg_values):
                         if adj.return_var is None or len(adj.return_var) == 0:
                             return None
                         if len(adj.return_var) == 1:
@@ -1453,14 +1556,6 @@ class Module:
         computed ``content_hash`` will be used.
         """
 
-        def get_annotations(obj: Any) -> Mapping[str, Any]:
-            """Alternative to `inspect.get_annotations()` for Python 3.9 and older."""
-            # See https://docs.python.org/3/howto/annotations.html#accessing-the-annotations-dict-of-an-object-in-python-3-9-and-older
-            if isinstance(obj, type):
-                return obj.__dict__.get("__annotations__", {})
-
-            return getattr(obj, "__annotations__", {})
-
         def get_type_name(type_hint):
             if isinstance(type_hint, warp.codegen.Struct):
                 return get_type_name(type_hint.cls)
@@ -1482,7 +1577,7 @@ class Module:
                 for struct in module.structs.values():
                     s = ",".join(
                         "{}: {}".format(name, get_type_name(type_hint))
-                        for name, type_hint in get_annotations(struct.cls).items()
+                        for name, type_hint in warp.codegen.get_annotations(struct.cls).items()
                     )
                     ch.update(bytes(s, "utf-8"))
 
@@ -1617,7 +1712,7 @@ class Module:
 
         with ScopedTimer(
             f"Module {self.name} {module_hash.hex()[:7]} load on device '{device}'", active=not warp.config.quiet
-        ):
+        ) as module_load_timer:
             # -----------------------------------------------------------
             # determine output paths
             if device.is_cpu:
@@ -1664,6 +1759,8 @@ class Module:
                 # dir may exist from previous attempts / runs / archs
                 Path(build_dir).mkdir(parents=True, exist_ok=True)
 
+                module_load_timer.extra_msg = " (compiled)"  # For wp.ScopedTimer informational purposes
+
                 # build CPU
                 if device.is_cpu:
                     # build
@@ -1690,6 +1787,7 @@ class Module:
 
                     except Exception as e:
                         self.cpu_build_failed = True
+                        module_load_timer.extra_msg = " (error)"
                         raise (e)
 
                 elif device.is_cuda:
@@ -1718,6 +1816,7 @@ class Module:
 
                     except Exception as e:
                         self.cuda_build_failed = True
+                        module_load_timer.extra_msg = " (error)"
                         raise (e)
 
                 # -----------------------------------------------------------
@@ -1751,6 +1850,8 @@ class Module:
                     except Exception as e:
                         # We don't need source_code_path to be copied successfully to proceed, so warn and keep running
                         warp.utils.warn(f"Exception when renaming {source_code_path}: {e}")
+            else:
+                module_load_timer.extra_msg = " (cached)"  # For wp.ScopedTimer informational purposes
 
             # -----------------------------------------------------------
             # Load CPU or CUDA binary
@@ -1763,6 +1864,7 @@ class Module:
                 if cuda_module is not None:
                     self.cuda_modules[device.context] = cuda_module
                 else:
+                    module_load_timer.extra_msg = " (error)"
                     raise Exception(f"Failed to load CUDA module '{self.name}'")
 
             if build_dir:
@@ -1933,10 +2035,13 @@ class ContextGuard:
 
 
 class Stream:
-    def __init__(self, device=None, **kwargs):
-        self.cuda_stream = None
-        self.owner = False
+    def __new__(cls, *args, **kwargs):
+        instance = super(Stream, cls).__new__(cls)
+        instance.cuda_stream = None
+        instance.owner = False
+        return instance
 
+    def __init__(self, device=None, **kwargs):
         # event used internally for synchronization (cached to avoid creating temporary events)
         self._cached_event = None
 
@@ -2012,9 +2117,12 @@ class Event:
         BLOCKING_SYNC = 0x1
         DISABLE_TIMING = 0x2
 
-    def __init__(self, device=None, cuda_event=None, enable_timing=False):
-        self.owner = False
+    def __new__(cls, *args, **kwargs):
+        instance = super(Event, cls).__new__(cls)
+        instance.owner = False
+        return instance
 
+    def __init__(self, device=None, cuda_event=None, enable_timing=False):
         device = get_device(device)
         if not device.is_cuda:
             raise RuntimeError(f"Device {device} is not a CUDA device")
@@ -2316,6 +2424,11 @@ Devicelike = Union[Device, str, None]
 
 
 class Graph:
+    def __new__(cls, *args, **kwargs):
+        instance = super(Graph, cls).__new__(cls)
+        instance.exec = None
+        return instance
+
     def __init__(self, device: Device, exec: ctypes.c_void_p):
         self.device = device
         self.exec = exec
@@ -2776,39 +2889,38 @@ class Runtime:
             self.core.volume_get_blind_data_info.restype = ctypes.c_char_p
 
             bsr_matrix_from_triplets_argtypes = [
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_uint64,
-                ctypes.c_uint64,
-                ctypes.c_uint64,
-                ctypes.c_uint64,
-                ctypes.c_uint64,
-                ctypes.c_uint64,
+                ctypes.c_int,  # rows_per_bock
+                ctypes.c_int,  # cols_per_blocks
+                ctypes.c_int,  # row_count
+                ctypes.c_int,  # tpl_nnz
+                ctypes.POINTER(ctypes.c_int),  # tpl_rows
+                ctypes.POINTER(ctypes.c_int),  # tpl_cols
+                ctypes.c_void_p,  # tpl_values
+                ctypes.c_bool,  # prune_numerical_zeros
+                ctypes.POINTER(ctypes.c_int),  # bsr_offsets
+                ctypes.POINTER(ctypes.c_int),  # bsr_columns
+                ctypes.c_void_p,  # bsr_values
+                ctypes.POINTER(ctypes.c_int),  # bsr_nnz
+                ctypes.c_void_p,  # bsr_nnz_event
             ]
+
             self.core.bsr_matrix_from_triplets_float_host.argtypes = bsr_matrix_from_triplets_argtypes
             self.core.bsr_matrix_from_triplets_double_host.argtypes = bsr_matrix_from_triplets_argtypes
             self.core.bsr_matrix_from_triplets_float_device.argtypes = bsr_matrix_from_triplets_argtypes
             self.core.bsr_matrix_from_triplets_double_device.argtypes = bsr_matrix_from_triplets_argtypes
 
-            self.core.bsr_matrix_from_triplets_float_host.restype = ctypes.c_int
-            self.core.bsr_matrix_from_triplets_double_host.restype = ctypes.c_int
-            self.core.bsr_matrix_from_triplets_float_device.restype = ctypes.c_int
-            self.core.bsr_matrix_from_triplets_double_device.restype = ctypes.c_int
-
             bsr_transpose_argtypes = [
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_uint64,
-                ctypes.c_uint64,
-                ctypes.c_uint64,
-                ctypes.c_uint64,
-                ctypes.c_uint64,
-                ctypes.c_uint64,
+                ctypes.c_int,  # rows_per_bock
+                ctypes.c_int,  # cols_per_blocks
+                ctypes.c_int,  # row_count
+                ctypes.c_int,  # col count
+                ctypes.c_int,  # nnz
+                ctypes.POINTER(ctypes.c_int),  # transposed_bsr_offsets
+                ctypes.POINTER(ctypes.c_int),  # transposed_bsr_columns
+                ctypes.c_void_p,  # bsr_values
+                ctypes.POINTER(ctypes.c_int),  # transposed_bsr_offsets
+                ctypes.POINTER(ctypes.c_int),  # transposed_bsr_columns
+                ctypes.c_void_p,  # transposed_bsr_values
             ]
             self.core.bsr_transpose_float_host.argtypes = bsr_transpose_argtypes
             self.core.bsr_transpose_double_host.argtypes = bsr_transpose_argtypes
@@ -3816,6 +3928,11 @@ class RegisteredGLBuffer:
     """
 
     __fallback_warning_shown = False
+
+    def __new__(cls, *args, **kwargs):
+        instance = super(RegisteredGLBuffer, cls).__new__(cls)
+        instance.resource = None
+        return instance
 
     def __init__(self, gl_buffer_id: int, device: Devicelike = None, flags: int = NONE, fallback_to_copy: bool = True):
         """
@@ -5138,6 +5255,9 @@ def type_str(t):
             return f"Transformation[{type_str(t._wp_scalar_type_)}]"
 
         raise TypeError("Invalid vector or matrix dimensions")
+    elif typing.get_origin(t) in (List, Mapping, Sequence, Union, Tuple):
+        args_repr = ", ".join(type_str(x) for x in typing.get_args(t))
+        return f"{t.__name__}[{args_repr}]"
 
     return t.__name__
 
@@ -5165,7 +5285,7 @@ def print_function(f, file, noentry=False):  # pragma: no cover
     try:
         # todo: construct a default value for each of the functions args
         # so we can generate the return type for overloaded functions
-        return_type = " -> " + type_str(f.value_func(None, None, None))
+        return_type = " -> " + type_str(f.value_func(None, None))
     except Exception:
         pass
 
@@ -5323,7 +5443,7 @@ def export_stubs(file):  # pragma: no cover
             try:
                 # todo: construct a default value for each of the functions args
                 # so we can generate the return type for overloaded functions
-                return_type = f.value_func(None, None, None)
+                return_type = f.value_func(None, None)
                 if return_type:
                     return_str = " -> " + type_str(return_type)
 
@@ -5369,20 +5489,24 @@ def export_builtins(file: io.TextIOBase):  # pragma: no cover
             if not f.is_simple():
                 continue
 
-            args = ", ".join(f"{ctype_arg_str(v)} {k}" for k, v in f.input_types.items())
-            params = ", ".join(f.input_types.keys())
-
-            return_type = ""
-
             try:
                 # todo: construct a default value for each of the functions args
                 # so we can generate the return type for overloaded functions
-                return_type = ctype_ret_str(f.value_func(None, None, None))
+                return_type = ctype_ret_str(f.value_func(None, None))
             except Exception:
                 continue
 
             if return_type.startswith("Tuple"):
                 continue
+
+            # Runtime arguments that are to be passed to the function, not its template signature.
+            if f.export_func is not None:
+                func_args = f.export_func(f.input_types)
+            else:
+                func_args = f.input_types
+
+            args = ", ".join(f"{ctype_arg_str(v)} {k}" for k, v in func_args.items())
+            params = ", ".join(func_args.keys())
 
             if args == "":
                 file.write(f"WP_API void {f.mangled_name}({return_type}* ret) {{ *ret = wp::{f.key}({params}); }}\n")

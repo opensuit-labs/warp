@@ -92,7 +92,6 @@ def _tet_node_index(tx: int, ty: int, tz: int, degree: int):
 
 
 class TetrahedronPolynomialShapeFunctions:
-    INVALID = wp.constant(-1)
     VERTEX = wp.constant(0)
     EDGE = wp.constant(1)
     FACE = wp.constant(2)
@@ -138,14 +137,10 @@ class TetrahedronPolynomialShapeFunctions:
 
     def _get_node_type_and_type_index(self):
         ORDER = self.ORDER
-        NODES_PER_ELEMENT = self.NODES_PER_ELEMENT
 
         def node_type_and_index(
             node_index_in_elt: int,
         ):
-            if node_index_in_elt < 0 or node_index_in_elt >= NODES_PER_ELEMENT:
-                return TetrahedronPolynomialShapeFunctions.INVALID, TetrahedronPolynomialShapeFunctions.INVALID
-
             if node_index_in_elt < 4:
                 return TetrahedronPolynomialShapeFunctions.VERTEX, node_index_in_elt
 
@@ -208,7 +203,7 @@ class TetrahedronPolynomialShapeFunctions:
 
     def make_trace_node_quadrature_weight(self):
         if self.ORDER == 3:
-            # P3 intrisic quadrature
+            # P3 intrinsic quadrature
             vertex_weight = 1.0 / 30
             edge_weight = 0.075
             interior_weight = 0.45
@@ -489,7 +484,7 @@ class TetrahedronNonConformingPolynomialShapeFunctions:
 
     def make_node_quadrature_weight(self):
         # Intrinsic quadrature -- precomputed integral of node shape functions
-        # over element. Order euqla to self.ORDER
+        # over element. Order equal to self.ORDER
 
         if self.ORDER == 2:
             vertex_weight = 0.07499641
