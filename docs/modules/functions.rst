@@ -150,9 +150,23 @@ Scalar Math
     Return the absolute value of ``x``.
 
 
+.. py:function:: abs(a: Vector[Any,Scalar]) -> Vector[Any,Scalar]
+    :noindex:
+    :nocontentsentry:
+
+    Return the absolute values of the elements of ``a``.
+
+
 .. py:function:: sign(x: Scalar) -> Scalar
 
     Return -1 if ``x`` < 0, return 1 otherwise.
+
+
+.. py:function:: sign(a: Vector[Any,Scalar]) -> Scalar
+    :noindex:
+    :nocontentsentry:
+
+    Return -1 for the negative elements of ``a``, and 1 otherwise.
 
 
 .. py:function:: step(x: Scalar) -> Scalar

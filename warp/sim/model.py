@@ -1251,7 +1251,7 @@ class ModelBuilder:
         self.joint_axis_total_count = 0
 
         self.up_vector = wp.vec3(up_vector)
-        self.up_axis = wp.vec3(np.argmax(np.abs(up_vector)))
+        self.up_axis = int(np.argmax(np.abs(up_vector)))
         self.gravity = gravity
         # indicates whether a ground plane has been created
         self._ground_created = False
@@ -4487,7 +4487,9 @@ class ModelBuilder:
 
             # enable ground plane
             m.ground_plane = wp.array(self._ground_params["plane"], dtype=wp.float32, requires_grad=requires_grad)
-            m.gravity = np.array(self.up_vector) * self.gravity
+            m.gravity = np.array(self.up_vector, dtype=wp.float32) * self.gravity
+            m.up_axis = self.up_axis
+            m.up_vector = np.array(self.up_vector, dtype=wp.float32)
 
             m.enable_tri_collisions = False
 

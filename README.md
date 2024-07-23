@@ -46,6 +46,30 @@ pip install https://github.com/NVIDIA/warp/releases/download/v1.2.0/warp_lang-1.
 
 The `--force-reinstall` option may need to be used to overwrite a previous installation.
 
+### CUDA Requirements
+
+* Warp packages built with CUDA Toolkit 11.x require NVIDIA driver 470 or newer.
+* Warp packages built with CUDA Toolkit 12.x require NVIDIA driver 525 or newer.
+
+This applies to pre-built packages distributed on PyPI and GitHub and also when building Warp from source.
+
+Note that building Warp with the `--quick` flag changes the driver requirements.  The quick build skips CUDA backward compatibility, so the minimum required driver is determined by the CUDA Toolkit version.  Refer to the [latest CUDA Toolkit release notes](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html) to find the minimum required driver for different CUDA Toolkit versions (e.g., [this table from CUDA Toolkit 12.5](https://docs.nvidia.com/cuda/archive/12.5.0/cuda-toolkit-release-notes/index.html#id4)).
+
+Warp checks the installed driver during initialization and will report a warning if the driver is not suitable, e.g.:
+```
+Warp UserWarning:
+   Insufficient CUDA driver version.
+   The minimum required CUDA driver version is 12.0, but the installed CUDA driver version is 11.8.
+   Visit https://github.com/NVIDIA/warp/blob/main/README.md#installing for guidance.
+```
+
+This will make CUDA devices unavailable, but the CPU can still be used.
+
+To remedy the situation there are a few options:
+* Update the driver.
+* Install a compatible pre-built Warp package.
+* Build Warp from source using a CUDA Toolkit that's compatible with the installed driver.
+
 ## Getting Started
 
 An example first program that computes the lengths of random 3D vectors is given below:
@@ -175,13 +199,13 @@ Built-in unit tests can be run from the command-line as follows:
             <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_convection_diffusion.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/fem_convection_diffusion.png"></a></td>
             <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_navier_stokes.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/fem_navier_stokes.png"></a></td>
             <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_burgers.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/fem_burgers.png"></a></td>
-            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_deformed_geometry.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/fem_deformed_geometry.png"></a></td>
+            <td><a href="https://github.com/NVIDIA/warp/tree/main/warp/examples/fem/example_magnetostatics.py"><img src="https://github.com/NVIDIA/warp/raw/main/docs/img/examples/fem_magnetostatics.png"></a></td>
         </tr>
         <tr>
             <td align="center">convection diffusion</td>
             <td align="center">navier stokes</td>
             <td align="center">burgers</td>
-            <td align="center">deformed geometry</td>
+            <td align="center">magnetostatics</td>
         </tr>
     </tbody>
 </table>

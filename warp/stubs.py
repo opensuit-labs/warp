@@ -168,8 +168,20 @@ def abs(x: Scalar) -> Scalar:
 
 
 @over
+def abs(a: Vector[Any, Scalar]) -> Vector[Any, Scalar]:
+    """Return the absolute values of the elements of ``a``."""
+    ...
+
+
+@over
 def sign(x: Scalar) -> Scalar:
     """Return -1 if ``x`` < 0, return 1 otherwise."""
+    ...
+
+
+@over
+def sign(a: Vector[Any, Scalar]) -> Scalar:
+    """Return -1 for the negative elements of ``a``, and 1 otherwise."""
     ...
 
 
